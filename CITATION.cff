@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+title: >-
+  Are Fairness Scores in Crime Prediction Telling Us the Truth?
+message: If you use this code or these findings, please cite it.
+type: software
+authors:
+  - given-names: Gaurav
+    family-names: Jha
+abstract: >-
+  Reported fairness gaps in crime-prediction models are largely explained by
+  base rates rather than model quality, and base-rate correction alone is
+  insufficient because a model can close a corrected gap by shifting its
+  decision threshold while its ranking ability degrades. Includes a
+  physics-informed model using the Short et al. (2008) burglary hotspot
+  equations.
+keywords:
+  - algorithmic fairness
+  - crime prediction
+  - evaluation metrics
+  - predictive policing
+  - physics-informed neural networks
+license: MIT
