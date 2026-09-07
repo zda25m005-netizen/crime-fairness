@@ -1,61 +1,112 @@
 # Are Fairness Scores in Crime Prediction Telling Us the Truth?
 
-Reported fairness gaps in crime-prediction models are largely explained by **how
-often crime happens**, not by how well the model serves each neighbourhood — and
-correcting for that is **not enough**, because a model can close a corrected gap
-by moving its decision threshold while getting genuinely worse.
+> **STATUS — read `STATUS.md` before using any number from this repo.**
+> The modelling results were **retracted on 2026-09-07**. The measurement
+> critique is the paper. The physics model does **not** work.
 
-This repository contains everything: the code, the data pipelines, every method
-we tried (including the six that failed), the mistakes we found in our own work,
-and the results that survived.
+Reported fairness gaps in crime-prediction models are largely explained by
+**how often crime happens**, not by how well a model serves each neighbourhood.
+Correcting for that is **not enough**, because a model can close a corrected gap
+by moving a threshold while getting genuinely worse — and because **pooling a
+metric across regions lets a model score by ranking regions instead of
+forecasting weeks.**
+
+We found the second failure in **our own headline result**, and retracted it.
 
 ---
 
-## The three findings
+## The findings that survive
 
-**1. The standard fairness metric can be moved without the model improving.**
+**1. The standard fairness metric moves without the model improving.**
 On Chicago, an intervention raised Tail-region F1 by **+16.95** and closed our
 base-rate-corrected gap from 40.97 to −2.39 — while Tail AUC *fell* 4.01 points
-and the positive-prediction rate went from 23% to 80%. Moving a **single decision
-threshold** on a model with no graph exceeded that entire "improvement"
-(+13.63 vs +12.87) with AUC provably unchanged at 61.99.
+and positive-prediction rate went 23% → 80%. Moving a **single decision
+threshold** on a model with no graph exceeded that whole "improvement"
+(+13.63 vs +12.87), with AUC provably unchanged at 61.99 on all 19 rows.
 
 **2. Published fairness gaps track crime volume.**
-Across six published crime-prediction models, reported scores correlate with
-crime volume at **r = 0.87–0.90**, Fisher combined **p = 1.3 × 10⁻⁵**. The result
-holds with **no distributional assumption at all** (rank-only correlation 0.875).
+Across six published models, reported scores correlate with crime volume at
+**r = 0.87–0.90**, Fisher combined **p = 1.3 × 10⁻⁵**, holding with no
+distributional assumption (rank-only 0.875). ST-HSL is non-significant and acts
+as an internal negative control. FedCrime's own tables: **r = 0.998**.
 
 **3. It changes who gets help.**
 Model *selection* is unaffected (0/5 groups change). Remediation *targeting*
-flips for **6/6 models**. The flaw does not mislead you about which method to
-use — it misleads you about *where the model is failing*.
+flips for **6/6 models**.
 
-**Plus a positive modelling result.** A physics-informed neural network using the
-Short et al. (2008) burglary hotspot equations beat its capacity-matched control
-by **+18.3 AUC** (t = 9.6, 5 seeds) and cut over-flagging of poor neighbourhoods
-from 3.2× to 1.8× reality.
+**4. Pooling inflates AUC — this one caught us.**
+A scorer that knows only *which region it is looking at*, with zero forecasting
+skill, gets **pooled AUC 66.67 / macro AUC 50.45**. Our own "+11.11 Tail
+advantage" and "+2.81 physics gain" were this artifact. Under within-region
+(macro) AUC the physics gain is **+0.16 ± 2.76, winning 4 of 8 bins** — nothing.
+
+**5. The fairness libraries have the same problem.**
+Fairlearn's **default** `demographic_parity` opens a **21.26 ± 0.52** TPR gap on
+data built to have equal skill. AIF360 `RejectOption` takes wrongful flagging of
+sparse regions from **13.49% → 41.55%**. AUC unmoved throughout.
+
+**6. No neural model beat a 4-week moving average.**
+On the base-rate-free target, in any region-density bin.
+
+---
+
+## What we tried, and what happened
+
+Every method was tested against an **identical model with the new component
+switched off** — same size, same seeds, same training.
+
+| # | Method | Result |
+|---|---|---|
+| 1 | Reweighting | ❌ gap 41 → 52, worse |
+| 2 | Group-DRO (τ = 3, 6, 10) | ❌ no change |
+| 3 | Adaptive per-region thresholds | ❌ plateaued ~41 |
+| 4 | Plain GCN, depths 1–4 | ❌ up to −57; collapses at depth ≥3 |
+| 5 | Gated GCN, depths 1–4 | ❌ −0.5 to −4.5; learns to switch itself off |
+| 6 | Attention GCN, depths 1–4 | ❌ −0.5 to −7.4 |
+| 7 | Neural ODE, α swept | ❌ flat at control |
+| 8 | ~~PINN (Short et al. PDE)~~ | ⚠️ **RETRACTED** — +18.3 AUC was on the confounded target; **+0.16 under macro AUC** |
+| 9 | Learned thresholds, Arm A | ❌ *created* a 35.56-point TPR gap |
+| 10 | Learned thresholds, Arm B | ✅ correct, but adds no skill — a measuring tool |
+
+**22 of 24** graph comparisons negative, 9 significantly so. Not one positive.
+**One of ten** interventions appeared to add skill, and it did not survive
+honest evaluation.
+
+---
+
+## Scope — what we do NOT claim
+
+- **FedCrime's actual claim was federated training without data sharing.** We
+  reproduced it and do not challenge it. We do not say "FedCrime is wrong."
+- **The Head/Mid/Tail split was ours**, not theirs. The 41-point gap came from
+  our own analysis, using a standard tool that gave a wrong answer.
+- Davis & Goadrich (2006) own the base-rate mathematics; Kleinberg et al. (2016)
+  and Chouldechova (2017) own the DP-vs-equalized-odds impossibility. We cite
+  both as background and claim neither.
+- We improved nothing about policing. That is the point of the paper.
 
 ---
 
 ## Quick start
 
-```bash
-git clone <this-repo>
-cd crime-fairness-repo
+```
+git clone https://github.com/zda25m005-netizen/crime-fairness.git
+cd crime-fairness
 pip install -r requirements.txt
 ```
 
-Analyses that need **no GPU and no data download** — run these first:
+No GPU and no download needed:
 
-```bash
+```
 python analysis/theory.py               # the maths, verified numerically
 python analysis/literature_audit.py     # 6 published models vs crime volume
-python analysis/sensitivity.py          # does the result depend on assumptions? (no)
-python analysis/decision_impact.py      # does it change decisions? (yes, for targeting)
+python analysis/decision_impact.py      # does it change decisions? (targeting: yes)
 python analysis/reanalysis_published.py # FedCrime's own tables
+python analysis/audit_fairness_tools.py # Fairlearn + AIF360 audit
+python analysis/multicity_audit.py --probe   # then drop --probe for 8 cities
 ```
 
-Everything else needs data and a GPU — see [`docs/REPRODUCE.md`](docs/REPRODUCE.md).
+The measurement critique needs **no model and no GPU**. That is deliberate.
 
 ---
 
@@ -63,135 +114,67 @@ Everything else needs data and a GPU — see [`docs/REPRODUCE.md`](docs/REPRODUC
 
 ```
 src/
-  fedcrime/          federated ST-GNN pipeline (TCN + ZINB + graph variants)
-    robust_fair_gnn.py   the main experiment script; all modes live here
-  fairaudit/         the auditing tool — metric taxonomy, skill scores, one-call audit
-  pinn/              physics-informed model
-    build_field.py       point crime records -> continuous field u(x,y,t)
-    crime_pinn.py        the PINN, the Short et al. PDE, and the ablations
-    signal_check.py      is there week-to-week signal at all? (run before tuning)
+  fedcrime/     federated ST-GNN pipeline (TCN + ZINB + graph variants)
+  fairaudit/    metric taxonomy, skill scores, one-call audit
+  pinn/
+    build_field.py               point records -> field u(x,y,t)
+    crime_pinn.py                the PINN and the Short et al. PDE
+    pinn_history.py              macro_auc() -- THE FIX. also the ablations
+    crossover.py                 density-binned audit, macro AUC throughout
+    signal_ceiling.py            is there any weekly signal? (3-way validated)
+    physics_normalized_eval.py   base-rate-free target; the A0 idea FAILED
+    pne_validate.py              synthetic validation of the transform
 
-analysis/            standalone analyses, most needing no GPU
-scripts/             data preparation from city open-data portals
-notebooks/           Colab/Kaggle notebooks, self-contained
-docs/                the full written record — see below
-figures/             every chart in the paper and slides
-presentations/       slides and speaking scripts
-results/             saved JSONL result files
-tests/               unit tests
+analysis/       standalone analyses, most needing no GPU
+  multicity_audit.py             replicates the CRITIQUE across cities, no training
+  audit_fairness_tools.py        Fairlearn + AIF360
+docs/           written record, incl. STATUS.md and MISTAKES.md
+figures/  presentations/  report/  results/  scripts/  notebooks/  tests/
 ```
-
----
-
-## The written record
-
-| Document | What it covers |
-|---|---|
-| [`docs/TIMELINE.md`](docs/TIMELINE.md) | Day 1 to now. Every phase, in order, with what changed and why |
-| [`docs/METHODS.md`](docs/METHODS.md) | Every method tried, how it works, why we tried it, why it failed or worked |
-| [`docs/RESULTS.md`](docs/RESULTS.md) | Every number, with seeds and significance tests |
-| [`docs/MISTAKES.md`](docs/MISTAKES.md) | Errors we found in our own work, and what we did about them |
-| [`docs/REPRODUCE.md`](docs/REPRODUCE.md) | How to re-run everything from scratch |
-
----
-
-## What we tried, and what happened
-
-Every method was tested against an **identical model with the new component
-switched off** — same size, same seeds, same training. Any difference is
-attributable to the component and nothing else.
-
-| # | Method | Result |
-|---|---|---|
-| 1 | Reweighting (higher loss weight on sparse regions) | ❌ gap 41 → 52, **worse** |
-| 2 | Group-DRO (optimise the worst group) | ❌ no change at τ = 3, 6, 10 |
-| 3 | Adaptive per-region thresholds | ❌ plateaued at ~41 |
-| 4 | Plain GCN, depths 1–4 | ❌ up to −57 AUC; collapses at depth ≥3 |
-| 5 | Gated GCN, depths 1–4 | ❌ −0.5 to −4.5; learns to switch itself off |
-| 6 | Attention GCN, depths 1–4 | ❌ −0.5 to −7.4 |
-| 7 | **PINN (Short et al. PDE)** | ✅ **+18.3 AUC, t = 9.6** |
-
-**22 of 24** graph comparisons negative, 9 significantly so. Not one positive.
 
 ---
 
 ## Reproducibility
 
-Every model result in `docs/RESULTS.md` comes from code with:
-
 - **Full determinism** — Python, NumPy, torch CPU and CUDA seeded; cuDNN
-  autotuning disabled; `torch.use_deterministic_algorithms(True)`.
-  Verify with `--repro-check`, which trains the same config twice and asserts
-  bit-identical output.
-- **Capacity-matched controls** — every treatment is compared against an
-  identical-size model with the component disabled, never against a smaller one.
-- **5 seeds** with mean ± std and Welch t-tests.
-- **Time-based splits** — never random, so the future cannot leak into training.
+  autotuning disabled; `torch.use_deterministic_algorithms(True)`. Verify with
+  `--repro-check`, which trains twice and asserts bit-identical output.
+- **Capacity-matched controls** — every treatment against an identical-size
+  model with the component disabled, never a smaller one.
+- **5 seeds**, mean ± std, Welch t-tests.
+- **Time-based splits** — never random.
+- **Leakage tests** — features verified to use only data strictly before the
+  target week, three separate ways.
 
-**Cross-hardware note.** Runs are bit-identical within one machine. Across
-different GPUs the direction and significance are stable but exact values vary
-by a small amount. Report hardware alongside numbers.
+⚠️ Results from before the determinism fix are **void**. Results from before the
+macro-AUC fix (2026-09-07) are **retracted** — see `STATUS.md`.
 
-⚠️ **Results produced before the determinism fix are void** and are not included
-here. See [`docs/MISTAKES.md`](docs/MISTAKES.md) for what was discarded and why.
+**Cross-hardware note.** Runs are bit-identical within one machine. Across GPUs
+the direction and significance are stable; exact values vary slightly.
 
 ---
 
 ## Ethics
 
-This work analyses predictive-policing systems. Two points we consider essential:
-
 1. **Recorded crime is not crime.** It measures where police went and what they
-   wrote down. Base rates are themselves shaped by policing patterns, so the
-   confound we describe compounds: a more heavily policed area has a higher
-   recorded rate, which inflates model scores there, which makes the fairness gap
-   look larger, which sends remediation to the wrong place.
-2. **The burglary model we implement derives from Broken Windows theory**, which
-   is contested — see Sampson & Raudenbush (2004) and Goodson & Hoyer-Leitzel
-   (2021), who argue the crime-hotspot modelling framework encodes systemic
-   racism. We implement it in order to *measure* what it does, particularly in
-   low-crime neighbourhoods. We do not claim it is a correct description of crime.
+   wrote down. Base rates are themselves shaped by policing, so the confound
+   compounds: a more heavily policed area has a higher recorded rate, which
+   inflates model scores there, which makes the fairness gap look larger, which
+   sends remediation to the wrong place.
+2. **The burglary model derives from Broken Windows theory**, which is contested
+   — Sampson & Raudenbush (2004), Goodson & Hoyer-Leitzel (2021). We implement
+   it to *measure* what it does, not because we think it is correct.
+3. **We built nothing that improves policing, and we are not trying to.** This
+   work argues that the reported numbers in this literature should not be
+   trusted, including our own.
 
 ---
 
 ## Key references
 
-The base-rate dependence of F1 and the invariance of AUC are **established**, and
-we do not claim them:
+Davis & Goadrich (2006) · Boyd et al. (2012) · Chouldechova (2017) ·
+Kleinberg, Mullainathan & Raghavan (2016) · Lipton et al. (2014) ·
+Short et al. (2008) · Lum & Isaac (2016) · Richardson et al. (2019) ·
+Ensign et al. (2018) · Sampson & Raudenbush (2004)
 
-- Davis & Goadrich (2006), *The relationship between Precision-Recall and ROC curves*
-- Boyd, Costa, Davis & Page (2012), *Unachievable region in precision-recall space*
-- Chouldechova (2017), *Fair prediction with disparate impact*
-
-Crime modelling and predictive policing:
-
-- Short, D'Orsogna, Pasour, Tita, Brantingham, Bertozzi & Chayes (2008),
-  *A statistical model of criminal behavior*, Math. Models Methods Appl. Sci. 18
-- Lum & Isaac (2016), *To predict and serve?*, Significance
-- Ensign, Friedler, Neville, Scheidegger & Venkatasubramanian (2018),
-  *Runaway feedback loops in predictive policing*, FAccT
-- Richardson, Schultz & Crawford (2019), *Dirty data, bad predictions*, NYU Law Review
-- Goodson & Hoyer-Leitzel (2021), *Examining the modeling framework of crime
-  hotspot models in predictive policing*, arXiv:2103.11757
-
----
-
-## Data
-
-No crime data is committed to this repository. All of it is public:
-
-| Source | Used for |
-|---|---|
-| [Chicago Open Data](https://data.cityofchicago.org/) (`ijzp-q8t2`) | Chicago crime, burglary field |
-| [FedCrime repo](https://github.com/vanetlabiitj/FedCrime) | Los Angeles 2018 |
-| [NYC Open Data](https://data.cityofnewyork.us/) (`qgea-i56i`) | New York base rates |
-| [SF Open Data](https://data.sfgov.org/) (`wg3w-h783`) | San Francisco base rates |
-| Chicago 311 (`v6vf-nfxy`) | Second (non-crime) domain |
-
-`scripts/` rebuilds all of them.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+MIT licensed. Data is public; see `scripts/` to rebuild it.
