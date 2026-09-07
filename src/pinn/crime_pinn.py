@@ -432,6 +432,16 @@ def train(args):
     print("  Compare F1 and AUC gaps: if only F1 moves, the change is threshold,")
     print("  not skill -- the failure mode this project already documented.")
 
+    if getattr(args, "save_ckpt", None):
+        os.makedirs(os.path.dirname(args.save_ckpt) or ".", exist_ok=True)
+        torch.save({"state_dict": model.state_dict(),
+                    "width": args.width, "depth": args.depth,
+                    "fourier": args.fourier, "f_scale": args.f_scale,
+                    "spatial_A0": not args.scalar_A0,
+                    "raw_scale": raw_scale, "scale": scale,
+                    "data": args.data, "seed": args.seed}, args.save_ckpt)
+        print(f"checkpoint -> {args.save_ckpt}")
+
     if args.save:
         os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
         with open(args.save, "a") as fh:
@@ -467,6 +477,8 @@ def main():
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default="results/pinn.jsonl")
+    ap.add_argument("--save-ckpt", default=None,
+                    help="write the trained model here, for physics_normalized_eval.py")
     train(ap.parse_args())
 
 

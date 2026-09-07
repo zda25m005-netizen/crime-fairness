@@ -1,0 +1,1063 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{empheq}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\definecolor{navy}{HTML}{1E2761}
+\definecolor{dkred}{HTML}{993C1D}
+\definecolor{dkgreen}{HTML}{0F6E56}
+\definecolor{codebg}{HTML}{F6F7F9}
+\definecolor{boxbg}{HTML}{F4F6FA}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single, rulecolor=\color{gray!40},
+  breaklines=true, showstringspaces=false,
+  keywordstyle=\color{navy}\bfseries,
+  commentstyle=\color{dkgreen}\itshape,
+  stringstyle=\color{dkred},
+  language=Python, numbers=left, numberstyle=\tiny\color{gray},
+  xleftmargin=1.6em, framexleftmargin=1.6em
+}
+\newtheorem{proposition}{Proposition}
+\newcommand{\A}{\mathcal{A}}
+
+% ---- a labelled box stating which data a section used -------------------
+\newcommand{\datatag}[2]{%
+  \begin{center}\small
+  \colorbox{boxbg}{\parbox{0.965\linewidth}{\textbf{Data:} #1 \\ \textbf{Code:} \texttt{#2}}}
+  \end{center}}
+\newcommand{\verdictgood}[1]{\textcolor{dkgreen}{\textbf{#1}}}
+\newcommand{\verdictbad}[1]{\textcolor{dkred}{\textbf{#1}}}
+
+\title{\textbf{Base-Rate and Operating-Point Confounding\\in Crime-Prediction Fairness Metrics}\\[4pt]
+\large A technical report: every method tried, the mathematics, and the results obtained}
+\author{Gaurav Jha}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Reported fairness gaps in crime prediction are largely attributable to
+\emph{base rates} rather than to differences in how well a model serves each
+neighbourhood. We show further that correcting for base rate is
+\emph{insufficient}: a model can close a base-rate-corrected gap entirely by
+shifting its decision threshold while its ranking ability degrades. We
+demonstrate this five independent ways --- in a federated spatio-temporal GNN,
+in a threshold sweep requiring no architectural change at all, in a
+physics-informed neural network (PINN) built on the Short et al.\ (2008)
+burglary equations, in a learned-threshold experiment where optimising the
+fairness-relevant metric \emph{creates} a $35.56$-point disparity, and in an
+audit of the two most widely used fairness libraries, whose default settings
+reproduce the same failure. Across four PINN configurations, real skill (AUC)
+spans $18.32$ points while the Head--Tail $F_1$ gap spans $2.06$; within the
+Tail group alone, $F_1$ varies by $0.28$ while AUC varies by $7.2$. The PINN is
+the only intervention of seven tested that beat its capacity-matched control
+($+18.32$ AUC, $t = 9.57$, five seeds). All model results use bit-reproducible
+training with capacity-matched controls.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Where we started, and where we are now}
+
+\subsection{The original problem}
+We reproduced FedCrime (Neurocomputing 679, 2026): federated crime prediction
+across six police stations with a zero-inflated negative binomial (ZINB) loss.
+
+\subsection{Where we are now}
+The gap is largely \emph{not a property of the model}. Section~\ref{sec:theory}
+gives the mathematics; Sections~\ref{sec:phases1}--\ref{sec:tools} give each
+method together with the results it produced. Seven interventions were tested
+against capacity-matched controls; six failed, and the one that succeeded
+(the PINN) simultaneously provided the cleanest demonstration that the standard
+fairness metric does not track model quality.
+
+\subsection{A note on which data each result uses}
+This project uses real data for its empirical findings and purpose-built
+synthetic data for two \emph{controlled} experiments. The distinction is
+important and is stated at the head of every section.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Section} & \textbf{Experiment} & \textbf{Data} \\
+\midrule
+\ref{sec:phases1} & FedCrime reproduction, federated baselines & real (LA 2018) \\
+\ref{sec:diagnosis} & Base-rate diagnosis, four cities, literature audit & real \\
+\ref{sec:interventions} & Reweighting, Group-DRO, adaptive thresholds & real (LA) \\
+\ref{sec:graphs} & Graph architectures, depth sweep & real (LA + Chicago) \\
+\ref{sec:sweep} & Threshold sweep & real (Chicago) \\
+\ref{sec:pinn} & Physics-informed model & real (Chicago burglary) \\
+\ref{sec:learned} & Learned thresholds, Arm A / Arm B & \textbf{synthetic} \\
+\ref{sec:tools} & Fairlearn / AIF360 audit & \textbf{synthetic} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Sections~\ref{sec:learned} and \ref{sec:tools} \emph{must} use synthetic data.
+Their claim is that a method reports or creates a disparity that does not exist.
+Establishing that requires knowing with certainty that no disparity exists,
+which on real data is unknowable --- sparse neighbourhoods may genuinely be
+harder to predict. By generating the data we make equal skill a property of the
+construction rather than an estimate, so any disparity the method reports is
+provably an artifact. This is instrument calibration against a known standard,
+not a shortcut.
+
+%======================================================================
+\section{Mathematical background}\label{sec:theory}
+
+\subsection{The skill-free baseline of $F_1$}
+Let a group have base rate $p = \Pr(y=1)$. Consider the \emph{skill-free}
+predictor $\hat{y}\equiv 1$: it ignores all inputs and predicts the positive
+class everywhere. Over $n$ samples,
+\[
+TP = np, \qquad FP = n(1-p), \qquad FN = 0 .
+\]
+Substituting into $F_1 = \dfrac{2TP}{2TP + FP + FN}$:
+\begin{equation}
+\A_{F_1}(p) \;=\; \frac{2np}{2np + n(1-p)} \;=\; \frac{2p}{1+p}.
+\label{eq:af1}
+\end{equation}
+
+\begin{proposition}[Attainability is base-rate dependent]
+$\A_{F_1}$ is strictly increasing in $p$ on $(0,1)$, since
+$\A_{F_1}'(p) = 2/(1+p)^2 > 0$. Hence two groups with identical model
+skill but different base rates yield different $F_1$, and their difference is
+non-zero by construction.
+\end{proposition}
+
+\noindent Concretely, at $p=0.50$ we get $\A_{F_1} = 66.7$; at $p=0.05$,
+$\A_{F_1}=9.5$. A model that never reads the data exhibits a $57$-point
+``fairness gap''.
+
+\subsection{Base-rate invariance of AUC}
+For the same skill-free predictor all scores are tied, so the Mann--Whitney
+statistic gives
+\begin{equation}
+\mathrm{AUC} \;=\; \Pr\!\big(s(x^+) > s(x^-)\big) + \tfrac12\Pr\!\big(s(x^+)=s(x^-)\big) \;=\; \tfrac12
+\label{eq:auc}
+\end{equation}
+independently of $p$. AUC conditions on class membership, so class balance
+cancels. This is why we treat AUC as the primary evidence throughout.
+
+\subsection{The skill score, and why it is not enough}
+The natural correction normalises the observed metric $M$ against its skill-free
+baseline:
+\begin{equation}
+s \;=\; \frac{M - \A(p)}{1 - \A(p)},
+\label{eq:skill}
+\end{equation}
+which is $0$ at the skill-free baseline and $1$ at perfect prediction.
+
+\paragraph{The failure.} Equation~\eqref{eq:skill} removes the dependence on
+$p$. It does \emph{not} remove the dependence on the decision threshold $\tau$.
+Writing $F_1$ explicitly as a function of both,
+\begin{equation}
+F_1(p,\tau) \;=\; \frac{2\,\mathrm{TPR}(\tau)\,p}{\mathrm{TPR}(\tau)\,p + \mathrm{FPR}(\tau)(1-p) + p},
+\label{eq:f1ptau}
+\end{equation}
+we see two free parameters. Correcting for $p$ leaves $\tau$ untouched. Since
+$\mathrm{TPR}$ and $\mathrm{FPR}$ are both monotone in $\tau$, a model can
+increase $F_1$ purely by lowering $\tau$ --- while
+$\mathrm{AUC} = \int_0^1 \mathrm{TPR}\,d\,\mathrm{FPR}$ is unchanged, being an
+integral over \emph{all} thresholds.
+
+\medskip
+\noindent\fbox{\parbox{0.96\linewidth}{%
+\textbf{Central claim.} Base-rate correction of a threshold-dependent metric is
+insufficient. Base rate and operating point are two distinct confounds;
+removing one leaves the other. An invariant metric is necessary, not merely
+preferable.}}
+\medskip
+
+\noindent We stress that Eqs.~\eqref{eq:af1}--\eqref{eq:auc} are
+\emph{established} \cite{davis2006,boyd2012,chouldechova2017} and are used here
+as background. The contributions are empirical.
+
+%======================================================================
+\section{Phase 1 --- Reproduction and baselines}\label{sec:phases1}
+\datatag{Real. Los Angeles 2018, 113 neighbourhoods, 8 crime types, 365 days.}{src/fedcrime/}
+
+\subsection{Method}
+A three-block temporal convolutional network (TCN) with dilations $\{1,2,4\}$
+and residual connections, followed by a mixing stage, then ZINB heads
+$(\pi,\mu,\phi)$ and a binary classifier head. Federated training uses FedAvg
+over six clients formed by round-robin assignment of regions ranked by crime
+volume. Class imbalance is handled with per-category positive weights
+$w_c = \mathrm{clip}(n^-_c/n^+_c, 1, 10)$:
+\[
+\mathcal{L} \;=\; \mathrm{BCE}_{w}(\hat{y}, y) \;+\; 0.3\,\mathcal{L}_{\mathrm{ZINB}}.
+\]
+
+\subsection{Results --- reproduction succeeded}
+We recovered the published trend as the data subset became sparser:
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Subset & $F_1$ \\
+\midrule
+Densest & $72.16$ \\
+Sparsest & $48.43$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Results --- the disparity appears}
+Partitioning regions by training-period crime volume into Head / Mid / Tail
+(20/30/50 percentiles):
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+& Head & Mid & Tail \\
+\midrule
+$F_1$ (LA 2018) & $69.4$ & $47.0$ & $\mathbf{28.2}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent A $\mathbf{41}$-point gap. Closing it became the research question.
+
+\subsection{Results --- federated baselines}
+Nine federated aggregation methods were implemented for comparison: FedAvg,
+FedProx, SCAFFOLD, MOON, FBLG, FedAvgM, FedTrimAvg, Multi-Krum and Bulyan.
+A defect in the Bulyan implementation (\texttt{sset\_w} / \texttt{sel\_size})
+was found and corrected during testing. No aggregation rule altered the
+Head--Tail gap materially, which was the first indication that the gap was not
+an optimisation artifact.
+
+%======================================================================
+\section{Phase 2 --- Diagnosis of the confound}\label{sec:diagnosis}
+\datatag{Real. Four cities; six published models; FedCrime's own published tables; Chicago 311 service requests. Plus one controlled simulation, marked below.}{analysis/theory.py, baserate\_analysis.py, literature\_audit.py, reanalysis\_published.py, decision\_impact.py}
+
+\subsection{Results --- the theory, verified}
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Check & Result \\
+\midrule
+$\A_{F_1}(p)=2p/(1+p)$ vs.\ empirical $F_1$ & matches, 8 base rates \\
+AUC of a skill-free predictor & $0.5$ at every $p$ \\
+Controlled simulation, \textbf{equal skill by construction} (synthetic) & $F_1$ gap $\mathbf{38.69}$, AUC gap $\mathbf{0.19}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent The third row is decisive: with skill held identical by construction,
+$F_1$ still reports a $38.69$-point gap while AUC correctly reports $0.19$.
+
+\subsection{Results --- four cities}
+Artifact gap, i.e.\ the $F_1$ gap attributable to base rate alone:
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+& Los Angeles & Chicago & New York & San Francisco \\
+\midrule
+Artifact gap & $42.8$ & $45.9$ & $19.9$ & $48.8$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Correlation with sparsity: $r = +0.835$. New York's lower value is
+consistent with its less extreme spatial concentration.
+
+\subsection{Results --- the published literature}
+Correlation between reported $F_1$ and a base-rate proxy across six published
+models, under six different assumptions:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Assumption for base rate & macro-$F_1$ & micro-$F_1$ \\
+\midrule
+Poisson & $0.642$ & $0.868$ \\
+Negative binomial, $k=5$ & $0.651$ & $0.875$ \\
+Negative binomial, $k=1$ & $0.662$ & $0.884$ \\
+Raw rate (no distribution) & $0.696$ & $0.899$ \\
+Log crime volume & $0.672$ & $0.890$ \\
+\textbf{Rank of crime volume only} & $\mathbf{0.719}$ & $\mathbf{0.875}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent The final row assumes \emph{nothing} --- only the ordering of groups,
+stated directly in the source papers --- and is \emph{higher} than the
+distributional version, so the finding does not depend on our modelling choices.
+Fisher combined $p = 1.32\times10^{-5}$; bootstrap $95\%$ CI over models
+$[+0.694,\,+0.974]$. ST-HSL is non-significant ($p = 0.36$) and serves as an
+internal negative control.
+
+\subsection{Results --- FedCrime's own tables, and a second domain}
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Re-analysis & Correlation \\
+\midrule
+FedCrime's own published tables & $r = 0.998$ \\
+Chicago 311 service requests (non-crime domain, same spatial units) & same pattern \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Results --- does it change decisions?}
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Decision & Changes after skill correction? \\
+\midrule
+Which model is best, per group & $\mathbf{0}$ of $5$ groups \\
+Which group needs remediation & $\mathbf{6}$ of $6$ models \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Mean Spearman $\rho$ between the raw-$F_1$ ranking and the
+skill-corrected ranking: $\mathbf{-0.700}$. The negative half of this result
+matters as much as the positive: the confound does \emph{not} invalidate model
+comparisons, only remediation targeting. Overstating the scope would be an
+error.
+
+%======================================================================
+\section{Phase 3 --- Fairness interventions}\label{sec:interventions}
+\datatag{Real. Los Angeles.}{src/fedcrime/robust\_fair\_gnn.py}
+
+\subsection{Reweighting}
+\paragraph{Method.} Per-region loss weights inversely proportional to density,
+$w_r = \mathrm{clip}(\bar{d}/d_r,\,1,\,4)$.
+\paragraph{Result.} Gap $41 \to \mathbf{52}$. \verdictbad{Worse.}
+\paragraph{Why it failed.} Increasing $w_r$ shifts the optimal operating point
+downward in $\tau$; recall rises, precision falls faster, $F_1$ decreases. It
+adds no information --- it is the mechanism of Eq.~\eqref{eq:f1ptau} again.
+
+\subsection{Group-DRO}
+\paragraph{Method.} Minimise the worst-group loss via soft weights
+$w_g \propto \exp(\tau_{\mathrm{DRO}}\,\ell_g)$, tested at
+$\tau_{\mathrm{DRO}} \in \{3, 6, 10\}$.
+\paragraph{Result.} No change at any setting; gap remained $\approx 41$.
+\verdictbad{Failed.}
+\paragraph{Why it failed.} The Tail group's attainable $F_1$ is bounded near
+$\A_{F_1}(p_{\text{tail}})$ by Eq.~\eqref{eq:af1}. Group-DRO helps when a group
+is underserved because the optimiser ignores it; here the group scores low
+because its events are \emph{rare}. Reallocating optimiser attention cannot
+alter a base rate.
+
+\subsection{Adaptive thresholds (first attempt)}
+\paragraph{Method.} Per-region, per-category $\tau$ tuned on validation.
+\paragraph{Result.} Improved to $\approx 41$, then plateaued. \verdictbad{Failed.}
+\paragraph{Why it failed.} Moving a threshold slides along the precision--recall
+curve without lifting it. No information enters the model.
+\medskip
+
+\noindent\fbox{\parbox{0.96\linewidth}{%
+This failure proved the most important of the three. It is the first evidence
+of what Section~\ref{sec:sweep} later established directly: the decision
+threshold can move the fairness score a long way with no change in model
+quality. Section~\ref{sec:learned} returns to it with a learned threshold.}}
+
+%======================================================================
+\section{Phase 4 --- Graph architectures}\label{sec:graphs}
+\datatag{Real. Los Angeles and Chicago. 3 architectures $\times$ 4 depths $\times$ 2 cities $\times$ 5 seeds, capacity-matched, bit-reproducible.}{src/fedcrime/robust\_fair\_gnn.py --gnn \{plain,gated,attn\}}
+
+\subsection{Method}
+Let $H \in \mathbb{R}^{B\times R\times d}$ be the TCN output and $\hat{A}$ the
+symmetrically normalised adjacency of a $k$-nearest-neighbour graph ($k = 6$)
+built from crime-pattern correlation on the training period.
+\begin{align}
+\text{plain: } && H' &= \sigma(\hat{A} H W) \\
+\text{gated: } && G &= \mathrm{sigmoid}(H W_g), \quad H' = \sigma\!\big(G \odot (\hat{A}HW) + (1-G)\odot H\big) \\
+\text{attention: } && \alpha_{ij} &= \mathrm{softmax}_j\!\left(\tfrac{(HW)_i \cdot (HW)_j}{\sqrt{d}}\right)\Big|_{\hat A_{ij}>0}, \quad H' = \sigma(\alpha H W)
+\end{align}
+Depth $L \in \{1,2,3,4\}$. \textbf{Each depth is paired with its own no-graph
+control at the same layer count}, so any difference is attributable to the graph
+and not to capacity.
+
+\subsection{Results --- all three variants, both cities}
+Values are the graph model minus its capacity-matched control, Tail $F_1$.
+Negative means the graph \emph{hurt}.
+\begin{center}
+\begin{tabular}{llrrrr}
+\toprule
+City & Variant & $L{=}1$ & $L{=}2$ & $L{=}3$ & $L{=}4$ \\
+\midrule
+\multirow{3}{*}{Los Angeles}
+ & Plain     & $-12.92$ & $-6.51$ & $-44.49$ & $-52.82$ \\
+ & Gated     & $-1.03$  & $-1.04$ & $-0.51$  & $-2.11$  \\
+ & Attention & $-0.47$  & $-1.10$ & $-0.71$  & $-0.85$  \\
+\midrule
+\multirow{3}{*}{Chicago}
+ & Plain     & $-16.29$ & $-3.55$ & $-57.52$ & $-56.01$ \\
+ & Gated     & $-2.30$  & $-2.83$ & $-2.79$  & $-4.46$  \\
+ & Attention & $+0.37$  & $+0.07$ & $-1.15$  & $-7.35$  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+& Los Angeles & Chicago \\
+\midrule
+Negative deltas & $12/12$ & $10/12$ \\
+Significant at $p<0.05$ & $9/12$ & --- \\
+\textbf{Significantly positive} & $\mathbf{0}$ & $\mathbf{0}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Overall: $\mathbf{22}$ of $24$ comparisons negative, $9$ significantly
+so, $\mathbf{0}$ significantly positive. The two positive Chicago values
+($+0.37$, $+0.07$) are an order of magnitude below the seed-to-seed standard
+deviation and are not interpreted.
+
+\subsection{Results --- why plain GCN collapses (over-smoothing)}
+Repeated application of $\hat{A}$ contracts the row space toward the leading
+eigenvector. Measuring region diversity as mean pairwise distance between
+$\ell_2$-normalised representations:
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Representation & Diversity \\
+\midrule
+Input $H$ & $1.3495$ \\
+Plain GCN, $L=4$ & $\mathbf{0.0359}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent $\mathbf{97\%}$ of the distinction between regions is destroyed, after
+which the model cannot assign them different predictions.
+
+\subsection{Results --- why gated and attention do not collapse}
+The gated variant is flat across depth and sits just below the control.
+Inspecting the learned gate gives $G \approx 0$: offered the freedom to choose
+how much neighbour information to admit, the model chooses approximately none,
+and pays a small penalty for the unused parameters. Attention degrades slightly
+more at depth because it can down-weight neighbours but cannot suppress them
+entirely.
+
+\medskip
+\noindent\fbox{\parbox{0.96\linewidth}{%
+This is the more informative of the two failures. It indicates the limitation is
+\emph{informational} rather than architectural: there is little transferable
+signal in the neighbourhood, and a sufficiently flexible model discovers this
+unaided.}}
+
+\subsection{Results --- Neural ODE / continuous depth}
+\paragraph{Method.} Forward-Euler integration of
+$\mathrm{d}h/\mathrm{d}t = \sigma(\hat{A}hW) - h$ with a \emph{single shared}
+weight matrix across steps, step size $\alpha$ swept over
+$\{0.05, 0.1, 0.25, 0.5, 0.75, 1.0\}$.
+\paragraph{Result.} Flat at the control across the entire sweep.
+\verdictbad{No improvement.} At $\alpha = 1.0$ the update reduces exactly to the
+discrete GCN, confirming the parameterisation spans the intended space and that
+the null result is not an implementation error.
+
+%======================================================================
+\section{Phase 5 --- The threshold sweep}\label{sec:sweep}
+\datatag{Real. Chicago. No graph; only the decision threshold varies.}{analysis/threshold\_sweep.py}
+
+\subsection{Method}
+Take the model with \emph{no graph}, retrain nothing, and vary only the decision
+threshold $\tau$ across $[0.05, 0.95]$ in nineteen steps.
+
+\subsection{Results}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+& Tail $F_1$ & says ``crime'' & Tail AUC \\
+\midrule
+No graph, $\tau=0.50$ (default) & $27.96$ & $22.7\%$ & $61.99$ \\
+Graph model, $\tau=0.50$ & $40.83$ & $89.7\%$ & $58.94$ \\
+\textbf{No graph, $\tau=0.35$} & $\mathbf{41.59}$ & $63.9\%$ & $\mathbf{61.99}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Moving one threshold yields $\mathbf{+13.63}$ --- \emph{exceeding} the
+entire architectural intervention's $+12.87$ --- with \emph{higher} AUC
+($61.99$ vs $58.94$) and substantially less over-prediction ($63.9\%$ vs
+$89.7\%$). AUC reads $61.99$ on \textbf{all nineteen rows} of the sweep, to the
+reported precision, exactly as Eq.~\eqref{eq:auc} requires.
+
+\medskip
+\noindent\fbox{\parbox{0.96\linewidth}{%
+This is the strongest single result in the project. By the metric the literature
+reports, a scalar with no information content outperforms the architecture.}}
+
+%======================================================================
+\section{Phase 6 --- The physics-informed model}\label{sec:pinn}
+\datatag{Real. Chicago burglary 2011--2015. $24\times24$ grid, weekly bins, 94{,}992 events, 183 training weeks, 41.5\% empty cells.}{src/pinn/build\_field.py, src/pinn/crime\_pinn.py}
+
+\subsection{The governing equations}
+We adopt the continuum limit of the Short et al.\ (2008) agent-based residential
+burglary model \cite{short2008}. Two coupled fields over the city domain
+$\Omega \subset \mathbb{R}^2$:
+\begin{itemize}\itemsep2pt
+\item $A(x,y,t)$ --- \emph{attractiveness}: the rate at which an offender
+present at a location commits a burglary there;
+\item $\rho(x,y,t)$ --- \emph{offender density}.
+\end{itemize}
+
+\begin{empheq}[box=\fbox]{align}
+\frac{\partial A}{\partial t} &= \eta\,\nabla^2 A \;-\; A \;+\; A_0(x,y) \;+\; \rho A
+\label{eq:pdeA}\\[4pt]
+\frac{\partial \rho}{\partial t} &= \nabla\!\cdot\!\Big(\nabla\rho - 2\frac{\rho}{A}\nabla A\Big) \;-\; \rho A \;+\; A \;-\; A_0(x,y)
+\label{eq:pderho}
+\end{empheq}
+
+\subsection{Term-by-term interpretation}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Term} & \textbf{Meaning} \\
+\midrule
+$\eta\nabla^2 A$ & attractiveness diffuses to nearby locations \\
+$-A$ & it decays toward baseline over time \\
+$+A_0(x,y)$ & static intrinsic appeal of a location \\
+$+\rho A$ & \textbf{a crime raises local attractiveness} (repeat victimisation) \\
+\midrule
+$\nabla^2\rho$ & offenders move diffusively \\
+$-2\nabla\!\cdot\!\big((\rho/A)\nabla A\big)$ & offenders advect \emph{up} the attractiveness gradient \\
+$-\rho A$ & an offender is removed after committing a crime \\
+$+A - A_0$ & replacement offenders enter the system \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The \textbf{observed} quantity is the crime rate
+\begin{equation}
+\lambda(x,y,t) \;=\; \rho(x,y,t)\,A(x,y,t).
+\label{eq:obs}
+\end{equation}
+Neither $A$ nor $\rho$ is observed separately --- the network must infer both
+from their product plus the physics constraint.
+
+\subsection{Consistency of the transcription}
+\begin{proposition}[Uniform steady state]
+At a spatially uniform steady state ($\nabla A = \nabla\rho = 0$,
+$\partial_t A = \partial_t \rho = 0$) both residuals vanish simultaneously
+if and only if $\rho A = A - A_0$.
+\end{proposition}
+\begin{proof}
+Eq.~\eqref{eq:pdeA} gives $0 = -A + A_0 + \rho A$, i.e.\ $\rho A = A - A_0$.
+Eq.~\eqref{eq:pderho} gives $0 = -\rho A + A - A_0$, the same relation. The two
+equations are therefore mutually consistent and not over-determined.
+\end{proof}
+\noindent \textbf{Result:} verified numerically to machine precision
+($|r_A| = |r_\rho| = 0$ at $A = 1.4$, $A_0 = 0.7$, $\rho = 0.5$).
+
+\subsection{The divergence term}
+With $w \equiv \rho/A$,
+\begin{equation}
+\nabla\!\cdot\!\big(w\,\nabla A\big) \;=\; \nabla w \cdot \nabla A \;+\; w\,\nabla^2 A .
+\label{eq:divexp}
+\end{equation}
+\noindent \textbf{Result:} verified against finite differences on a
+$400\times400$ grid with smooth test fields; maximum relative error
+$\mathbf{3.9\times10^{-5}}$.
+
+\subsection{Loss function}
+\begin{equation}
+\mathcal{L} \;=\; \mathcal{L}_{\mathrm{data}} \;+\; \lambda_p\,\mathcal{L}_{\mathrm{phys}}
+\end{equation}
+
+\paragraph{Data term (Poisson).} Burglary counts $y_i \in \mathbb{Z}_{\geq0}$
+are Poisson, not Gaussian. With predicted rate $\mu_i = s\,\rho_i A_i$,
+\begin{equation}
+\mathcal{L}_{\mathrm{data}} \;=\; \frac{1}{N}\sum_{i=1}^{N}\Big(\mu_i - y_i\log\mu_i\Big),
+\label{eq:poisson}
+\end{equation}
+the negative Poisson log-likelihood up to a constant.
+
+\medskip
+\noindent\emph{Why this matters for fairness.} Squared error weights every cell
+by $(\mu_i - y_i)^2$, so high-count (Head) cells dominate the gradient --- a
+Head bias baked into the objective. \textbf{Result:} the Poisson term reduced
+Tail over-prediction from $3.2\times$ to $\mathbf{1.8\times}$ the true rate.
+
+\paragraph{Physics term.} Residuals are formed by moving all terms to one side:
+\begin{align}
+r_A &= \partial_t A - \big(\eta\nabla^2 A - A + A_0 + \rho A\big) \\
+r_\rho &= \partial_t \rho - \big(\nabla^2\rho - 2\nabla\!\cdot\!((\rho/A)\nabla A) - \rho A + A - A_0\big)
+\end{align}
+\begin{equation}
+\mathcal{L}_{\mathrm{phys}} \;=\; \frac{1}{N_c}\sum_{j} r_A(z_j)^2 \;+\; \frac{1}{N_c}\sum_{j} r_\rho(z_j)^2 ,
+\end{equation}
+evaluated at collocation points sampled \emph{inside the city mask} ---
+sampling the bounding box would enforce burglary physics over Lake Michigan.
+All derivatives come from automatic differentiation.
+
+\subsection{Parameterisation}
+The network $f_\theta:(x,y,t)\mapsto(A,\rho)$ uses random Fourier features
+\cite{tancik2020} followed by a $5\times128$ tanh MLP:
+\[
+\gamma(z) = [\sin(2\pi B z),\, \cos(2\pi B z)], \qquad B \sim \mathcal{N}(0,\sigma^2),\ \sigma = 3 .
+\]
+Outputs pass through softplus to enforce $A > 0$ (required, since $A$ appears in
+a denominator) and $\rho \geq 0$. Two physical quantities are \textbf{learned,
+not fixed}: the diffusion coefficient $\eta = \mathrm{softplus}(\theta_\eta)$,
+and $A_0(x,y)$ as a \emph{spatial field}, faithful to the source, which states
+$A_0$ ``is not necessarily uniform over the lattice grids''
+\cite{short2008,wang2020}.
+
+\subsection{Results --- main comparison (5 seeds)}
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+Configuration & $n$ & AUC & $F_1$ & RMSE & learned $\eta$ \\
+\midrule
+Short PDE + Poisson & 5 & $\mathbf{71.49\pm2.93}$ & $70.52\pm1.49$ & $1.354$ & $0.0121$ \\
+Short PDE + MSE & 5 & $\mathbf{71.12\pm1.50}$ & $69.99\pm1.12$ & $1.379$ & $0.0172$ \\
+No physics (control) & 5 & $53.17\pm2.46$ & $66.01\pm0.93$ & $1.750$ & --- \\
+\textbf{Generic smoothness} & 1 & $\mathbf{44.63}$ & $66.90$ & $1.523$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+vs.\ control & $\Delta$AUC & $t$ & $\Delta F_1$ & $t$ \\
+\midrule
+Short + Poisson & $\mathbf{+18.32}$ & $9.57^{**}$ & $+4.51$ & $5.15^{**}$ \\
+Short + MSE & $+17.95$ & $12.46^{**}$ & $+3.98$ & $5.49^{**}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Results --- the decisive ablation}
+To rule out ``any smoothness prior would do'', the PDEs are replaced by a
+generic penalty containing no criminological content:
+\begin{equation}
+\mathcal{L}_{\mathrm{smooth}} \;=\; \frac{1}{N_c}\sum_j \big(\partial_t u\big)^2 + \big(\nabla^2 u\big)^2, \qquad u = \rho A .
+\end{equation}
+\noindent \textbf{Result: $\mathbf{44.63}$} --- below the no-physics control
+($53.17$) \emph{and} below chance ($50$). The gain is therefore attributable to
+the burglary equations specifically, not to regularisation. This is the most
+reviewer-proof result in the project.
+
+\subsection{Results --- learned diffusion constant}
+$\eta \approx 0.012$--$0.017$, consistently across seeds. A small value implies
+attractiveness spreads only a short distance, consistent with criminology:
+near-repeat effects are measured over metres and weeks, not kilometres and
+years. The model recovered a physically plausible constant it was never given.
+
+\subsection{Results --- Tail regions (true rate 28.5\%)}
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Configuration & Tail $F_1$ & Tail AUC & says ``crime'' & $\times$ true rate \\
+\midrule
+Short + Poisson & $43.64\pm2.75$ & $\mathbf{58.35\pm3.29}$ & $52.2\%$ & $\mathbf{1.8\times}$ \\
+Short + MSE & $43.36\pm3.14$ & $57.81\pm3.05$ & $56.1\%$ & $2.0\times$ \\
+No physics & $43.45\pm0.98$ & $51.14\pm1.72$ & $90.2\%$ & $3.2\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Results --- the measurement finding, restated}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Configuration & pooled AUC & Head$-$Tail $F_1$ gap & AUC gap \\
+\midrule
+Short + Poisson & $71.49$ & $47.32\pm2.65$ & $\mathbf{-1.92}$ \\
+Short + MSE & $71.12$ & $47.60\pm3.21$ & $\mathbf{-3.50}$ \\
+No physics & $53.17$ & $45.54\pm1.91$ & $+0.33$ \\
+\midrule
+\textbf{Range} & $\mathbf{18.32}$ & $\mathbf{2.06}$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Real skill spans $18.32$ points; the reported fairness gap spans
+$2.06$. Sharper still, \emph{within the Tail group alone}, $F_1$ reads
+$43.64 / 43.36 / 43.45$ --- a spread of $\mathbf{0.28}$ --- while Tail AUC spans
+$\mathbf{7.2}$. Same group, same base rate, same threshold procedure.
+
+\medskip
+\noindent \textbf{The sign also reverses.} The $F_1$ gap reports Head regions as
+$\sim$47 points better served; the AUC gap reports Head as \emph{worse} served
+in both physics models. The two metrics disagree about \emph{who is being
+failed}.
+
+%======================================================================
+\section{Phase 7 --- Learned thresholds}\label{sec:learned}
+\datatag{\textbf{Synthetic.} Three groups; $P(s\mid y)$ identical in all groups so skill is equal by construction; base rates $0.60 / 0.35 / 0.12$. See Section~\ref{sec:phases1} for why real data cannot answer this question.}{learned\_thresholds.py}
+
+\subsection{Motivation}
+The supervisor proposed \emph{adaptive} thresholds: not a fixed rule, and not a
+hand-written formula, but a threshold the model determines from data. This
+returns to the intervention of Section~\ref{sec:interventions} with the
+threshold made learnable.
+
+\subsection{Method}
+A threshold is a step function and has no gradient. We replace the hard
+comparison with a sigmoid relaxation, which is differentiable:
+\begin{equation}
+p_i = \mathrm{sigmoid}\big(\beta (s_i - \tau)\big), \qquad \beta = 50,
+\end{equation}
+\begin{align}
+TP = \textstyle\sum_i p_i y_i, \quad
+FP = \textstyle\sum_i p_i (1-y_i), \quad
+FN = \textstyle\sum_i (1-p_i) y_i,
+\end{align}
+\begin{equation}
+\text{soft-}F_1 = \frac{2\,TP}{2\,TP + FP + FN}.
+\end{equation}
+At $\beta = 50$ the sigmoid closely approximates a step, so the soft counts
+track the true counts while retaining a gradient. Two objectives were compared:
+\begin{itemize}\itemsep2pt
+\item \textbf{Arm A} --- maximise soft-$F_1$ within each group;
+\item \textbf{Arm B} --- match each group's false-positive rate $F_g$ to the
+pooled rate $\varphi$ at $\tau = 0.50$: $\;\mathcal{L} = \sum_g (F_g - \varphi)^2$.
+\end{itemize}
+
+\subsection{Results}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Method & $F_1$ gap & AUC gap & \textbf{TPR gap} \\
+\midrule
+Fixed $\tau = 0.50$ & $+37.66$ & $-0.07$ & $-0.13$ \\
+\textbf{Arm A} --- maximise soft-$F_1$ & $+35.14$ & $-0.07$ & $\mathbf{+35.56}$ \\
+\textbf{Arm B} --- matched FPR & $+37.15$ & $-0.07$ & $-1.57$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Results --- what Arm A did, per group}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Group & Threshold chosen & TPR (\% of real events caught) \\
+\midrule
+Head & $0.425$ & $89.10$ \\
+Mid & $0.520$ & $75.34$ \\
+Tail & $\mathbf{0.601}$ & $\mathbf{53.54}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Arm A set the \emph{highest} threshold for the sparsest group,
+producing a $35.56$-point disparity in who is caught --- on data where every
+group is equally predictable by construction.
+\verdictbad{Arm A is actively harmful.} It manufactures precisely the harm the
+intervention was intended to remove.
+
+\subsection{Why Arm A chose a higher threshold for the sparse group}
+The classifier is calibrated to the \emph{pooled} base rate, not the per-group
+rate. In a low-base-rate group its scores systematically overstate
+$\Pr(y=1)$, so the threshold must rise to compensate. This is arithmetic, not
+prejudice --- but the distributional consequence is identical.
+
+\medskip
+\noindent \emph{Relation to prior work.} Lipton et al.\ (2014)
+\cite{lipton2014} show the $F_1$-optimal threshold equals $F_1^*/2$ for
+\emph{calibrated} probabilities, which predicts a \emph{lower} threshold for a
+sparse group. Our scores are calibrated to the pooled rate, not per group, which
+accounts for the opposite direction. Any write-up must engage with this.
+
+\subsection{Interpretation}
+\verdictgood{Arm B is correct but adds no skill.} AUC moved by $0.07$ in all
+three conditions --- the model was never altered. The conclusion is that
+adaptive thresholding is \textbf{not a remedy}; it is a \textbf{measuring
+instrument} that quantifies how far the reported score can travel while the
+model stands still.
+
+\subsection{An error we made and corrected}
+Our first Arm B objective minimised the spread in \emph{true}-positive rate.
+That objective is degenerate: it drove every threshold to $0.02$, so the model
+predicted positive everywhere and every group attained $\mathrm{TPR} = 100\%$
+--- a perfect fairness score from a useless model. This was caught in an
+independent NumPy validation before any result was trusted, and the objective
+was rewritten to match false-positive rates.
+
+%======================================================================
+\section{Phase 8 --- Auditing the fairness toolkits}\label{sec:tools}
+\datatag{\textbf{Synthetic.} $s \mid y{=}1 \sim \mathcal{N}(1,1)$ and $s \mid y{=}0 \sim \mathcal{N}(0,1)$, identical in all three groups; base rates $0.60/0.35/0.12$. Fairlearn 0.14.0, AIF360 0.6.1, scikit-learn 1.7.2.}{audit\_fairness\_tools.py}
+
+\subsection{Motivation}
+The preceding sections concern our own models. The question of external
+relevance is whether the same failure appears in the tooling practitioners
+actually deploy. Fairlearn (Microsoft) and AIF360 (IBM) are the two most widely
+used fairness libraries; both ship post-processing methods that adjust per-group
+decision thresholds.
+
+\subsection{Validation of the test bed}
+Before invoking any library, equal skill was verified by hand: the TPR of each
+group at a matched false-positive rate.
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+FPR held at & Head & Mid & Tail \\
+\midrule
+$5\%$ & $30.2$ & $25.9$ & $29.9$ \\
+$10\%$ & $41.8$ & $38.4$ & $40.5$ \\
+$20\%$ & $56.7$ & $57.1$ & $56.5$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Equal within sampling noise, as constructed. On this data the correct
+audit finding is that no group is served worse.
+
+\subsection{Results --- the metric functions}
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+Group & accuracy & precision & recall & $F_1$ & AUC \\
+\midrule
+Head & $63.46$ & $84.84$ & $48.00$ & $61.31$ & $76.87$ \\
+Mid & $72.99$ & $64.12$ & $47.07$ & $54.28$ & $76.24$ \\
+Tail & $81.53$ & $32.16$ & $45.82$ & $37.79$ & $76.03$ \\
+\midrule
+\textbf{\texttt{MetricFrame.difference()}} & $18.06$ & $\mathbf{52.67}$ & $2.18$ & $\mathbf{23.52}$ & $\mathbf{0.84}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Fairlearn reports a $52.67$-point precision disparity and a
+$23.52$-point $F_1$ disparity on groups with identical ROC curves. Recall
+($2.18$) and AUC ($0.84$) are correct.
+
+\subsection{Results --- Fairlearn \texttt{ThresholdOptimizer}, 5 seeds}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\texttt{constraints} & flagged gap & \textbf{TPR gap} & AUC gap \\
+\midrule
+baseline ($\tau = 0.50$) & $+15.98\pm0.66$ & $+0.35\pm1.32$ & $+0.16\pm0.68$ \\
+\texttt{demographic\_parity} \textbf{[DEFAULT]} & $-0.02\pm0.16$ & $\mathbf{-21.26\pm0.52}$ & $+0.16\pm0.68$ \\
+\texttt{true\_positive\_rate\_parity} & $+15.93\pm0.74$ & $-0.02\pm0.12$ & $+0.16\pm0.68$ \\
+\texttt{false\_positive\_rate\_parity} & $+15.66\pm1.16$ & $+0.27\pm2.23$ & $+0.16\pm0.68$ \\
+\texttt{equalized\_odds} & $+15.21\pm0.78$ & $+0.18\pm0.32$ & $+0.16\pm0.68$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The library default \emph{opens} a $21.26$-point TPR disparity where
+the pre-intervention gap was $+0.35 \pm 1.32$. Per group under the default:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Group & flagged & TPR & FPR \\
+\midrule
+Head & $24.2\%$ & $35.50$ & $7.12$ \\
+Mid & $24.3\%$ & $46.07$ & $13.05$ \\
+Tail & $24.3\%$ & $56.33$ & $\mathbf{19.84}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Selection rates are equalised as promised, but the sparse group's
+false-alarm rate is now $2.8\times$ the dense group's. In a policing deployment
+that is wrongful surveillance of the low-crime area, produced by the fairness
+intervention.
+
+\subsection{Results --- AIF360 post-processors}
+Head privileged, Tail unprivileged; AIF360 reports unprivileged minus
+privileged.
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Method & DP diff & EO diff & Tail TPR & \textbf{Tail FPR} \\
+\midrule
+baseline ($\tau = 0.50$) & $-16.68$ & $-2.18$ & $45.82$ & $13.49$ \\
+\texttt{EqOddsPostprocessing} & $-15.54$ & $+0.18$ & $45.82$ & $13.49$ \\
+\texttt{CalibratedEqOdds} (fnr) & $-16.68$ & $-2.18$ & $45.82$ & $13.49$ \\
+\texttt{RejectOption} (stat.\ parity) & $-4.46$ & $+12.26$ & $78.06$ & $\mathbf{41.55}$ \\
+\texttt{RejectOption} (equal opp.) & $-20.12$ & $-2.75$ & $68.67$ & $31.54$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent \texttt{RejectOptionClassification} on statistical parity raises the
+Tail group's false-positive rate from $13.49\%$ to $\mathbf{41.55\%}$ --- three
+times as many crime-free locations flagged --- to close a parity gap that was an
+artifact of the base rate. \texttt{CalibratedEqOdds} changed nothing at all.
+Per-group AUC is $76.9 / 76.0$ on every row: post-processing re-thresholds, it
+does not re-rank.
+
+\subsection{Scope of this claim --- stated precisely}
+The constraints targeting TPR or both error rates behave \emph{correctly} here,
+with gaps near zero. The failure is specific to the parity-of-selection family,
+which happens to contain the default.
+
+\medskip
+\noindent\fbox{\parbox{0.96\linewidth}{%
+\textbf{Honesty requirement.} The incompatibility of demographic parity and
+equalized odds under unequal base rates is a \emph{known} theoretical result
+\cite{kleinberg2016,chouldechova2017} and must be cited as such. Our
+contribution is narrower and must be stated as: this known incompatibility is
+the \emph{default configuration} of widely deployed software, and its cost is
+quantifiable ($21.26$-point TPR gap; $3\times$ wrongful flagging).}}
+
+%======================================================================
+\section{Experimental protocol}\label{sec:protocol}
+
+\subsection{Determinism}
+Seeding \texttt{torch} alone is insufficient on GPU: cuDNN selects algorithms by
+autotuning and several CUDA kernels accumulate non-deterministically. Our
+initial results were consequently irreproducible (Section~\ref{sec:mistakes}).
+All reported results use:
+\begin{lstlisting}
+def seed_everything(seed: int):
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    random.seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+\end{lstlisting}
+\noindent plus gradient clipping at norm $1.0$ and a non-finite-loss guard. A
+\texttt{-{}-repro-check} mode trains an identical configuration twice and
+asserts bit-identical output. \textbf{Result: difference $0.00000000$.}
+
+\subsection{Capacity-matched controls}
+\begin{lstlisting}
+for depth in [1, 2, 3, 4]:
+    m_graph   = run(use_graph=True,  n_layers=depth)   # treatment
+    m_control = run(use_graph=False, n_layers=depth)   # same size, no graph
+    delta = m_graph["overall"] - m_control["overall"]  # isolates the graph
+\end{lstlisting}
+
+\subsection{Statistics}
+Five seeds per configuration; mean $\pm$ standard deviation reported. Group
+comparisons use the Welch $t$-statistic
+\begin{equation}
+t \;=\; \frac{\bar{x}_1 - \bar{x}_2}{\sqrt{s_1^2/n_1 + s_2^2/n_2}},
+\end{equation}
+with $|t| > 2.78$ ($df = 4$) taken as $p < 0.05$. The literature audit
+additionally uses permutation tests ($2\times10^5$ permutations), Fisher's
+method for combining $p$-values, and a bootstrap CI over models as the unit of
+generalisation.
+
+%======================================================================
+\section{Summary of every method tested}
+
+\begin{center}
+\begin{tabular}{clccl}
+\toprule
+\# & Method & Data & Effect vs.\ matched control & Verdict \\
+\midrule
+1 & Reweighting & real & gap $41 \to 52$ & \verdictbad{worse} \\
+2 & Group-DRO ($\tau = 3,6,10$) & real & no change & \verdictbad{fail} \\
+3 & Adaptive thresholds & real & plateau at $\sim41$ & \verdictbad{fail} \\
+4 & Plain GCN, $L = 1\ldots4$ & real & $-12.9$ to $-57.5$ & \verdictbad{worse} \\
+5 & Gated GCN, $L = 1\ldots4$ & real & $-0.5$ to $-4.5$ & \verdictbad{worse} \\
+6 & Attention GCN, $L = 1\ldots4$ & real & $-0.5$ to $-7.4$ & \verdictbad{worse} \\
+7 & Neural ODE, $\alpha$ swept & real & flat at control & \verdictbad{fail} \\
+8 & \textbf{PINN (Short et al.\ PDE)} & real & $\mathbf{+18.32}$ AUC, $t = 9.57$ & \verdictgood{works} \\
+9 & Learned thresholds, Arm A & synth. & $+35.56$ TPR gap created & \verdictbad{harmful} \\
+10 & Learned thresholds, Arm B & synth. & correct, no skill added & \verdictgood{diagnostic} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent One intervention of ten added genuine skill. Five demonstrations ---
+the graph experiments, the threshold sweep, the PINN configurations, the learned
+thresholds, and the library audit --- independently establish the same
+measurement finding.
+
+%======================================================================
+\section{Errors identified and corrected}\label{sec:mistakes}
+\begin{center}
+\begin{tabular}{p{5cm}p{9.8cm}}
+\toprule
+\textbf{Error} & \textbf{Resolution} \\
+\midrule
+Results not reproducible; identical commands gave $48.86$ and $54.03$ & Only \texttt{torch.manual\_seed} was set. Fixed by full determinism (Section~\ref{sec:protocol}). \textbf{All prior model results discarded.} \\
+\addlinespace
+Controls not capacity-matched: depth-4 graph vs.\ 1-layer control & Every depth now paired with its own control at the same layer count. \\
+\addlinespace
+An apparent fairness breakthrough ($+16.95$ Tail $F_1$, corrected gap $\to -2.39$) & Tail AUC had \emph{fallen} $4.01$ and positive-prediction rate rose $23\% \to 80\%$. Withdrawn as a positive result; became the central finding. \\
+\addlinespace
+All per-group metrics returned NaN & Labels were derived from the smoothed field, making every label 1. Fixed to use raw counts. \\
+\addlinespace
+Collocation sampled from the bounding box & Physics was enforced over Lake Michigan. Fixed to sample within the city mask. \\
+\addlinespace
+Degenerate Arm B objective drove all thresholds to $0.02$ & Minimising TPR spread rewards predicting positive everywhere. Rewritten as matched FPR (Section~\ref{sec:learned}). \\
+\addlinespace
+\texttt{-{}-sampling adaptive} was described as Lin \& Chen's method & Theirs is causality-guided; ours was plain residual-based. Documented as not implemented. \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent We also corrected claims in our own writing: $\A_{F_1}$ is the
+\emph{skill-free baseline}, not a ceiling (models exceed it); the theory of
+Section~\ref{sec:theory} is established, not novel; and bit-reproducibility
+holds within, not across, hardware.
+
+\paragraph{Excluded work.} A sparsity-camouflaged attack and a density/graph
+``vouching'' aggregator were developed in an earlier phase. Those results
+predate the determinism fix and are \textbf{void}; they are retained in the
+repository for continuity and excluded from any write-up.
+
+%======================================================================
+\section{Limitations}
+\begin{enumerate}\itemsep3pt
+\item \textbf{The PINN learns \emph{where}, not \emph{when}.} Per-group AUC is
+$51$--$58$; most of the pooled $71.49$ derives from discriminating between
+neighbourhoods rather than between weeks within one.
+\item \textbf{Residual over-prediction.} Even the best configuration flags
+$1.8\times$ the true Tail rate.
+\item \textbf{Scale.} Two cities, one country; one crime type for the PINN.
+\item \textbf{The region graph is correlational}, built from crime-pattern
+similarity rather than physical street adjacency. A street-network graph is a
+natural further test.
+\item \textbf{Sections~\ref{sec:learned} and \ref{sec:tools} use synthetic
+data.} This is required to establish their claims, but it means we show these
+methods \emph{can} be fooled, not how severely they fail on Chicago
+specifically. Running the learned-threshold experiment on real Chicago scores
+remains outstanding.
+\item \textbf{Recorded crime is not crime.} It measures police activity. Base
+rates are themselves shaped by policing, so the confound compounds.
+\item \textbf{The burglary model derives from Broken Windows theory}, which is
+contested \cite{sampson2004,goodson2021}. We implement it in order to
+\emph{measure} its behaviour, particularly in low-crime neighbourhoods; we do
+not endorse it as a description of crime.
+\item Cross-hardware variation affects the third significant digit.
+\end{enumerate}
+
+%======================================================================
+\section{Recommendations}
+\begin{enumerate}\itemsep2pt
+\item Never report a threshold-dependent fairness gap alone.
+\item Base-rate correction is \emph{not} sufficient; state the operating point.
+\item Report an invariant metric (AUC, balanced accuracy) alongside any $F_1$ gap.
+\item Report the positive-prediction rate per group.
+\item Treat any gap closure unmatched by an invariant metric as \textbf{unverified}.
+\item When using a fairness library, do not accept the default constraint
+without checking what it optimises.
+\end{enumerate}
+
+%======================================================================
+\begin{thebibliography}{99}\small
+\bibitem{boyd2012} K. Boyd, V. S. Costa, J. Davis, C. D. Page.
+\emph{Unachievable region in precision-recall space and its effect on empirical evaluation}. ICML, 2012.
+\bibitem{chouldechova2017} A. Chouldechova.
+\emph{Fair prediction with disparate impact: a study of bias in recidivism prediction instruments}. Big Data 5(2), 2017.
+\bibitem{davis2006} J. Davis, M. Goadrich.
+\emph{The relationship between precision-recall and ROC curves}. ICML, 2006.
+\bibitem{ensign2018} D. Ensign, S. A. Friedler, S. Neville, C. Scheidegger, S. Venkatasubramanian.
+\emph{Runaway feedback loops in predictive policing}. FAccT, 2018.
+\bibitem{goodson2021} H. Goodson, A. Hoyer-Leitzel.
+\emph{Examining the modeling framework of crime hotspot models in predictive policing}. arXiv:2103.11757, 2021.
+\bibitem{kleinberg2016} J. Kleinberg, S. Mullainathan, M. Raghavan.
+\emph{Inherent trade-offs in the fair determination of risk scores}. ITCS, 2017 (arXiv 2016).
+\bibitem{lipton2014} Z. C. Lipton, C. Elkan, B. Naryanaswamy.
+\emph{Optimal thresholding of classifiers to maximize F1 measure}. ECML PKDD, 2014.
+\bibitem{lum2016} K. Lum, W. Isaac.
+\emph{To predict and serve?} Significance 13(5), 2016.
+\bibitem{richardson2019} R. Richardson, J. Schultz, K. Crawford.
+\emph{Dirty data, bad predictions}. NYU Law Review, 2019.
+\bibitem{sampson2004} R. J. Sampson, S. W. Raudenbush.
+\emph{Seeing disorder: neighborhood stigma and the social construction of broken windows}. Social Psychology Quarterly 67(4), 2004.
+\bibitem{short2008} M. B. Short, M. R. D'Orsogna, V. B. Pasour, G. E. Tita, P. J. Brantingham, A. L. Bertozzi, L. B. Chayes.
+\emph{A statistical model of criminal behavior}. Math.\ Models Methods Appl.\ Sci.\ 18(supp01), 2008.
+\bibitem{tancik2020} M. Tancik et al.
+\emph{Fourier features let networks learn high frequency functions in low dimensional domains}. NeurIPS, 2020.
+\bibitem{wang2020} C. Wang, Y. Zhang, A. L. Bertozzi, M. B. Short.
+\emph{A stochastic-statistical residential burglary model with independent Poisson clocks}. European J.\ Applied Mathematics, 2020.
+\end{thebibliography}
+
+\end{document}
