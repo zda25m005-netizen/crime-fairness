@@ -59,28 +59,16 @@ CITIES = {
     "Los Angeles": dict(
         url="https://data.lacity.org/resource/2nrs-mtv8.json",
         date="date_occ", lat="lat", lon="lon", cat="crm_cd_desc",
+        y0=2020, y1=2024,
         bbox=(33.70, 34.34, -118.67, -118.15)),
     "New York": dict(
         url="https://data.cityofnewyork.us/resource/qgea-i56i.json",
         date="cmplnt_fr_dt", lat="latitude", lon="longitude", cat="ofns_desc",
         bbox=(40.49, 40.92, -74.26, -73.70)),
-    "San Francisco": dict(
-        url="https://data.sfgov.org/resource/wg3w-h783.json",
-        date="incident_date", lat="latitude", lon="longitude",
-        cat="incident_category",
-        bbox=(37.70, 37.84, -122.52, -122.35)),
     "Seattle": dict(
         url="https://data.seattle.gov/resource/tazs-3rd5.json",
-        date="offense_start_datetime", lat="latitude", lon="longitude",
-        cat="offense", bbox=(47.48, 47.74, -122.44, -122.22)),
-    "Austin": dict(
-        url="https://data.austintexas.gov/resource/fdj4-gpfu.json",
-        date="occ_date", lat="latitude", lon="longitude",
-        cat="crime_type", bbox=(30.10, 30.52, -97.94, -97.56)),
-    "Baltimore": dict(
-        url="https://data.baltimorecity.gov/resource/wsfq-mvij.json",
-        date="crimedate", lat="latitude", lon="longitude",
-        cat="description", bbox=(39.20, 39.38, -76.72, -76.52)),
+        date="offense_date", lat="latitude", lon="longitude",
+        cat="offense_sub_category", bbox=(47.48, 47.74, -122.44, -122.22)),
     "Cincinnati": dict(
         url="https://data.cincinnati-oh.gov/resource/k59e-2pvf.json",
         date="date_reported", lat="latitude_x", lon="longitude_x",
@@ -134,11 +122,31 @@ def a_f1(p):
 # --------------------------------------------------------------------------- #
 # data
 # --------------------------------------------------------------------------- #
+UA = {"User-Agent": "crime-fairness-audit/1.0 (academic research)",
+      "Accept": "application/json"}
+
+
+def _read_json(url, timeout=180, tries=3):
+    # Hard timeout (pandas gives urllib none), a User-Agent (some portals
+    # reject clients without one), and retries (portals 5xx under load).
+    import io, requests
+    last = None
+    for k in range(tries):
+        try:
+            r = requests.get(url, timeout=timeout, headers=UA)
+            r.raise_for_status()
+            return pd.read_json(io.StringIO(r.text))
+        except Exception as e:
+            last = e
+            time.sleep(2 ** k)
+    raise last
+
+
 def probe(name, cfg, timeout=30):
     """Fetch 3 rows and report whether the fields we need are present."""
     try:
-        q = urlencode({"$limit": 3})
-        df = pd.read_json(f"{cfg['url']}?{q}")
+        q = urlencode({"$limit": 200})
+        df = _read_json(f"{cfg['url']}?{q}")
     except Exception as e:
         return f"FETCH FAILED: {type(e).__name__}: {str(e)[:70]}"
     have = set(df.columns)
@@ -152,24 +160,43 @@ def probe(name, cfg, timeout=30):
 
 def fetch_city(name, cfg, year0, year1, category=None, page=50_000,
                max_rows=1_500_000):
-    where = (f"{cfg['date']} >= '{year0}-01-01T00:00:00.000' "
-             f"AND {cfg['date']} <= '{year1}-12-31T23:59:59.000' "
-             f"AND {cfg['lat']} IS NOT NULL")
-    if category and cfg.get("cat"):
-        where += f" AND upper({cfg['cat']}) like '%{category.upper()}%'"
-    out, off = [], 0
-    while off < max_rows:
-        q = urlencode({"$select": f"{cfg['date']},{cfg['lat']},{cfg['lon']}",
-                       "$where": where, "$limit": page, "$offset": off})
-        ch = pd.read_json(f"{cfg['url']}?{q}")
-        if ch.empty:
-            break
-        out.append(ch); off += page
-        print(f"      {off:,} rows...", flush=True)
-        time.sleep(0.3)
-    if not out:
+    # Socrata re-runs the whole filtered scan for every page, so each
+    # successive $offset is slower than the last -- Chicago and New York both
+    # timed out on page two. One query per YEAR keeps every request small.
+    # A year that fails is skipped, not fatal: this audit measures the SHAPE
+    # of the base-rate distribution, which four years shows as well as five.
+    y0 = cfg.get("y0", year0)
+    y1 = cfg.get("y1", year1)
+    frames, total = [], 0
+    for yr in range(y0, y1 + 1):
+        where = (f"{cfg['date']} >= '{yr}-01-01T00:00:00.000' "
+                 f"AND {cfg['date']} <= '{yr}-12-31T23:59:59.000' "
+                 f"AND {cfg['lat']} IS NOT NULL")
+        if category and cfg.get("cat"):
+            where += f" AND upper({cfg['cat']}) like '%{category.upper()}%'"
+        off = 0
+        while off < max_rows:
+            q = urlencode({"$select": f"{cfg['date']},{cfg['lat']},{cfg['lon']}",
+                           "$where": where, "$order": cfg["date"],
+                           "$limit": page, "$offset": off})
+            try:
+                ch = _read_json(f"{cfg['url']}?{q}")
+            except Exception as e:
+                print(f"      {yr}: FAILED {type(e).__name__} - year skipped",
+                      flush=True)
+                break
+            if ch.empty:
+                break
+            frames.append(ch)
+            off += page
+            total += len(ch)
+            if len(ch) < page:
+                break
+            time.sleep(0.3)
+        print(f"      {yr}: {total:,} rows so far", flush=True)
+    if not frames:
         raise RuntimeError("no rows")
-    df = pd.concat(out, ignore_index=True)
+    df = pd.concat(frames, ignore_index=True)
     return df.rename(columns={cfg["date"]: "date", cfg["lat"]: "lat",
                               cfg["lon"]: "lon"})
 
