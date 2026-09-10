@@ -30,6 +30,28 @@ Across six published models, reported scores correlate with crime volume at
 distributional assumption (rank-only 0.875). ST-HSL is non-significant and acts
 as an internal negative control. FedCrime's own tables: **r = 0.998**.
 
+**2b. It holds in five cities, and the size of it is predictable.**
+No model trained — a scorer built to have *identical* skill in every group, so
+the honest gap is 0.00 everywhere:
+
+| city | window | base gap | F1 gap | macro AUC gap |
+|---|---|---|---|---|
+| Chicago | 2015–19 | +55.1% | +36.09 | +1.74 |
+| Los Angeles | 2020–24 | +64.1% | +39.40 | +0.15 |
+| New York | 2015–19 | +71.9% | +48.70 | −0.66 |
+| Seattle | 2015–19 | +51.5% | +43.64 | −0.26 |
+| Cincinnati | 2015–19 | +32.7% | +39.26 | +1.36 |
+| **mean** | | +55.1% | **+41.42 ± 4.87** | **+0.46 ± 1.04** |
+
+Macro AUC sits at **76.21 ± 0.66** across all 15 city-group cells. And
+`A_F1(p)`, computed from the base rates alone, **predicts** the observed F1 gap
+at **r = +0.94** (exact permutation p = 0.025), observed/predicted
+**0.786 ± 0.052**. The artifact isn't just present — its magnitude follows a
+closed-form function of crime volume.
+
+Cities use their own year windows because portals don't publish the same period;
+that is sound here because the audit compares Head vs Tail *within* a city.
+
 **3. It changes who gets help.**
 Model *selection* is unaffected (0/5 groups change). Remediation *targeting*
 flips for **6/6 models**.
@@ -41,9 +63,19 @@ advantage" and "+2.81 physics gain" were this artifact. Under within-region
 (macro) AUC the physics gain is **+0.16 ± 2.76, winning 4 of 8 bins** — nothing.
 
 **5. The fairness libraries have the same problem.**
-Fairlearn's **default** `demographic_parity` opens a **21.26 ± 0.52** TPR gap on
-data built to have equal skill. AIF360 `RejectOption` takes wrongful flagging of
-sparse regions from **13.49% → 41.55%**. AUC unmoved throughout.
+On data built to have equal skill, Fairlearn's **default** `demographic_parity`
+equalises the flag rate at ~24% everywhere and in doing so opens a
+**−21.26 ± 0.52** Head-minus-Tail TPR gap — the *sparse* group ends up with the
+higher true-positive rate (56.33 vs 35.50) **and** the higher false-alarm rate
+(19.84 vs 7.12). In plain terms: the low-crime area is over-flagged while the
+busy area starts missing real crime (TPR 48.00 → 35.50). `equalized_odds` and
+`true_positive_rate_parity` behave correctly — the failure is specific to the
+parity-of-selection family, which happens to be the default.
+
+AIF360 `RejectOptionClassification` on statistical parity takes wrongful
+flagging of sparse regions from **13.59% → 41.09%**. `CalibratedEqOdds(fnr)`
+changes nothing at all. Per-group AUC is unmoved on every row — post-processing
+re-thresholds, it does not re-rank.
 
 **6. No neural model beat a 4-week moving average.**
 On the base-rate-free target, in any region-density bin.
@@ -103,10 +135,19 @@ python analysis/literature_audit.py     # 6 published models vs crime volume
 python analysis/decision_impact.py      # does it change decisions? (targeting: yes)
 python analysis/reanalysis_published.py # FedCrime's own tables
 python analysis/audit_fairness_tools.py # Fairlearn + AIF360 audit
-python analysis/multicity_audit.py --probe   # then drop --probe for 8 cities
+python analysis/multicity_audit.py --probe   # check the portals respond
+python analysis/multicity_audit.py --year0 2015 --year1 2019 \
+       --grid 24 --category BURGLARY        # the 5-city table above
 ```
 
 The measurement critique needs **no model and no GPU**. That is deliberate.
+
+**Portal caveats**, recorded because they cost us a day: Austin publishes no
+lat/lon, Baltimore's endpoint no longer returns JSON, San Francisco 403s
+automated clients, Los Angeles's current file starts in 2020, and Seattle's
+burglary label is in `offense_sub_category`. `pandas.read_json(url)` sets no
+timeout, so a slow portal hangs indefinitely — fetch year by year through a
+wrapper with a timeout, a User-Agent and retries.
 
 ---
 

@@ -50,6 +50,17 @@ GROUPS = ("Head", "Mid", "Tail")
 # City endpoints. Socrata portals share a query language but NOT field names,
 # so each city carries its own mapping. bbox trims mis-geocoded rows (0,0 is a
 # common junk value) and water.
+#
+# y0/y1 are OPTIONAL per-city year windows. Cities do not all publish the same
+# period -- Los Angeles's current file starts in 2020 -- and forcing one global
+# window silently returns zero rows. We do NOT need a common window: the audit
+# measures the Head-Tail gap WITHIN each city, so each city may use whatever
+# five years it has. Report the window per city in the paper.
+#
+# Dropped after the 2026-09-10 probe:
+#   Austin      fdj4-gpfu   publishes no lat/lon columns
+#   Baltimore   wsfq-mvij   endpoint no longer returns JSON
+#   San Fran.   wg3w-h783   portal returns HTTP 403 to automated clients
 # --------------------------------------------------------------------------- #
 CITIES = {
     "Chicago": dict(
@@ -59,7 +70,7 @@ CITIES = {
     "Los Angeles": dict(
         url="https://data.lacity.org/resource/2nrs-mtv8.json",
         date="date_occ", lat="lat", lon="lon", cat="crm_cd_desc",
-        y0=2020, y1=2024,
+        y0=2020, y1=2024,                 # this file begins in 2020
         bbox=(33.70, 34.34, -118.67, -118.15)),
     "New York": dict(
         url="https://data.cityofnewyork.us/resource/qgea-i56i.json",
@@ -68,6 +79,8 @@ CITIES = {
     "Seattle": dict(
         url="https://data.seattle.gov/resource/tazs-3rd5.json",
         date="offense_date", lat="latitude", lon="longitude",
+        # offense_category is only PROPERTY/VIOLENT/ALL OTHER; the offence
+        # label we need is one level down.
         cat="offense_sub_category", bbox=(47.48, 47.74, -122.44, -122.22)),
     "Cincinnati": dict(
         url="https://data.cincinnati-oh.gov/resource/k59e-2pvf.json",
@@ -127,9 +140,17 @@ UA = {"User-Agent": "crime-fairness-audit/1.0 (academic research)",
 
 
 def _read_json(url, timeout=180, tries=3):
-    # Hard timeout (pandas gives urllib none), a User-Agent (some portals
-    # reject clients without one), and retries (portals 5xx under load).
-    import io, requests
+    """pd.read_json() with a HARD TIMEOUT, a User-Agent, and retries.
+
+    Three separate failures forced this:
+      * pandas hands the URL to urllib with NO timeout, so a wedged portal
+        blocks the process for ever instead of raising (New York did this).
+      * some portals reject clients that send no User-Agent.
+      * open-data portals return transient 5xx under load; one retry fixes it.
+    Everything that touches the network goes through here.
+    """
+    import io
+    import requests
     last = None
     for k in range(tries):
         try:
@@ -145,8 +166,8 @@ def _read_json(url, timeout=180, tries=3):
 def probe(name, cfg, timeout=30):
     """Fetch 3 rows and report whether the fields we need are present."""
     try:
-        q = urlencode({"$limit": 200})
-        df = _read_json(f"{cfg['url']}?{q}")
+        q = urlencode({"$limit": 3})
+        df = _read_json(f"{cfg['url']}?{q}", timeout=timeout)
     except Exception as e:
         return f"FETCH FAILED: {type(e).__name__}: {str(e)[:70]}"
     have = set(df.columns)
@@ -160,11 +181,18 @@ def probe(name, cfg, timeout=30):
 
 def fetch_city(name, cfg, year0, year1, category=None, page=50_000,
                max_rows=1_500_000):
-    # Socrata re-runs the whole filtered scan for every page, so each
-    # successive $offset is slower than the last -- Chicago and New York both
-    # timed out on page two. One query per YEAR keeps every request small.
-    # A year that fails is skipped, not fatal: this audit measures the SHAPE
-    # of the base-rate distribution, which four years shows as well as five.
+    """Download one city, ONE YEAR AT A TIME.
+
+    The obvious implementation -- one filtered query paged with $offset --
+    fails on the big portals. Socrata re-runs the whole filtered scan for every
+    page, so each successive $offset is slower than the last, and Chicago and
+    New York both timed out on page two. Querying year by year keeps every
+    request small and independent.
+
+    A year that fails is reported and skipped rather than killing the city:
+    this audit measures the SHAPE of the base-rate distribution, which four
+    years establishes as well as five.
+    """
     y0 = cfg.get("y0", year0)
     y1 = cfg.get("y1", year1)
     frames, total = [], 0
@@ -182,7 +210,7 @@ def fetch_city(name, cfg, year0, year1, category=None, page=50_000,
             try:
                 ch = _read_json(f"{cfg['url']}?{q}")
             except Exception as e:
-                print(f"      {yr}: FAILED {type(e).__name__} - year skipped",
+                print(f"      {yr}: FAILED {type(e).__name__} — year skipped",
                       flush=True)
                 break
             if ch.empty:
